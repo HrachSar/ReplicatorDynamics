@@ -113,7 +113,7 @@ __host__ void Simulator::AllocateMemory(){
         printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
         exit(EXIT_FAILURE);
     }
-    cudaMemcpyToSymbol(d_A, A, 4 * sizeof(float)); //for constant memory
+    cudaMemcpyToSymbol(d_A, A, 2 * sizeof(float)); //for constant memory
 
     m_hresults.resize(N, 0);
     m_htimes.resize(N, 0);
@@ -296,25 +296,25 @@ Simulator::~Simulator(){
 int main(){
 
 	float a = 3.0f;
-	float eps = 4.0f;
-	float rate = 1.0f;
+	float eps = 2.0f;
+	float rate = 3.0f;
 	float h = 0.01;
 	float tmin = 0;
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-	float tmax = 1000.0f * Simulator::MyMax(std::abs(1.0f / (a + eps)), std::abs(1.0f / (a - eps)), std::abs(1.0f / (2*a + eps)), std::abs(1.0f / (2*a - eps)), 
-                            std::abs(a / ((a - eps)*(2*a - eps))), std::abs(a / ((a + eps)*(2*a + eps))));
+	float tmax = 1000.0f * Simulator::MyMax(std::abs(1.0f / (-2*a + eps)), std::abs(1.0f / (-2*a - eps)), std::abs(1.0f / (2*a + eps)), std::abs(1.0f / (2*a - eps)), 
+                            std::abs(-2*a / ((-2*a - eps)*(2*a - eps))), std::abs(-2*a / ((-2*a + eps)*(2*a + eps))));
     std::string_view path_deterministic = "results_deterministic.txt";
     std::string_view path_stochastic = "results.txt";
     std::string_view path_periodic = "results_periodic.txt";
 
-    Simulator simulator(blocks, threads, a, 2*a, rate, eps, h, tmin, tmax, path_deterministic, path_periodic, path_stochastic);
+    Simulator simulator(blocks, threads, -2*a, 2*a, rate, eps, h, tmin, tmax, path_deterministic, path_periodic, path_stochastic);
     printf("Tmax = %f\n", tmax);
 
-    simulator.ComputeRateValsPeriodic(0, 100);
-    cudaDeviceSynchronize();
-    simulator.FreeMemory();
-    /*simulator.AllocateMemory();
+    //simulator.ComputeRateValsPeriodic(0, 100);
+    //cudaDeviceSynchronize();
+    //simulator.FreeMemory();
+    simulator.AllocateMemory();
     SimulateDynamics<<<simulator.m_blocks, simulator.m_threads>>>(12345ULL, simulator.m_tmin, simulator.m_tmax, 
                         simulator.m_eps, simulator.m_rate, simulator.m_dt, simulator.m_dresults, simulator.m_dtimes);
     cudaMemcpy(simulator.m_hresults.data(), simulator.m_dresults, N * sizeof(float), cudaMemcpyDeviceToHost);
@@ -322,11 +322,13 @@ int main(){
 
     cudaDeviceSynchronize();
     simulator.WriteIntoFiles(simulator.m_hresults, simulator.m_htimes, simulator.m_stc_file);
-    simulator.FreeMemory(); */
+    simulator.FreeMemory();
+
+    /*
     simulator.AllocateMemory();
     simulator.ComputeRateValsStochastic(0, 100);
     cudaDeviceSynchronize();
     simulator.FreeMemory();
-
+    */
     return 0;
 }
