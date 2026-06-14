@@ -21,6 +21,7 @@ static __host__ constexpr auto MyMax(Args&& ...args){
 }
 
 namespace Kernels{
+    __global__ void SimulateDynamicsWithInitialVal(float x, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
     __global__ void SimulateDynamics(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
     __global__ void SolveDynamicsDeterministic(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
     __global__ void SimulateDynamicsPeriodic(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
@@ -105,6 +106,7 @@ class Simulator{
         __host__ void ComputeRateValsPeriodic(int start_rate, int end_rate);
         __host__ void ComputeRateValsStochastic(int start_rate, int end_rate);
         __host__ void ComputeRateValsDeterministic(int start_rate, int end_rate);
+        __host__ void ComputeXTimesStochastic(int start_x, int end_x);
         Simulator(int blocks, int threads, SimulatorConfig& config, PathManager& path_manager, ResourceManager& resource_manager);
         ~Simulator();
         __host__ int GetNumBlocks();

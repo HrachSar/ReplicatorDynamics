@@ -8,21 +8,21 @@
 
 int main(){
 
-	float a = 0.3f;
-	float eps = 0.2f;
-	float rate = 0.1f;
+	float a = 0.6f;
+	float eps = 0.8f;
+	float rate = 1.0f;
 	float h = 0.01;
 	float tmin = 0;
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-	float tmax = 1000.0f * MyMax(std::abs(1.0f / (2*a + eps)), std::abs(1.0f / (2*a - eps)), std::abs(1.0f / (2*a + eps)), std::abs(1.0f / (2*a - eps)), 
-                            std::abs(2*a / ((2*a - eps)*(2*a - eps))), std::abs(2*a / ((2*a + eps)*(2*a + eps))));
+	float tmax = 100.0f * MyMax(std::abs(1.0f / (a + eps)), std::abs(1.0f / (a - eps)), std::abs(1.0f / (2*a + eps)), std::abs(1.0f / (2*a - eps)), 
+                            std::abs(a / ((a - eps)*(2*a - eps))), std::abs(a / ((a + eps)*(2*a + eps))));
     
     std::string_view path_deterministic = "results_deterministic.txt";
     std::string_view path_stochastic = "results.txt";
     std::string_view path_periodic = "results_periodic.txt";
     
-    SimulatorConfig config(2*a, 2*a, rate, eps, h, tmin, tmax);
+    SimulatorConfig config(a, 2*a, rate, eps, h, tmin, tmax);
     PathManager path_manager(path_deterministic, path_periodic, path_stochastic);
     ResourceManager res = ResourceManager();
 
@@ -37,10 +37,9 @@ int main(){
 
     // sim.m_path_manager.WriteIntoFiles(sim.m_resource_manager.m_hresults, sim.m_resource_manager.m_htimes, sim.m_path_manager.m_stc_file);
     
-    // simulator.AllocateMemory();
     sim.ComputeRateValsPeriodic(0, 100);
     cudaDeviceSynchronize();
-    // simulator.FreeMemory();
+
     
     return 0;
 }            

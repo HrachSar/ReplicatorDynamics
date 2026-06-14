@@ -2,6 +2,40 @@
 
 float A[2] = {0};
 
+
+__global__ void Kernels::SimulateDynamicsWithInitialVal(float init_x, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times){
+    int id = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if(id >= N)
+        return;
+
+    curandState rng;
+    curand_init(seed, id, 0, &rng);  
+
+ 	
+    float X_temp = init_x;
+    float t = tmin;
+	while(t < tmax){
+
+		float u  = curand_uniform(&rng);
+		float dg_step = 0;
+        float t0 = -logf(u + 1e-9f);
+		float etta_temp = (curand_uniform(&rng) > 0.5f) ? eps : -eps;
+
+		while(dg_step < t0){
+			float df_step = Simulator::MidpointSolverf(X_temp, etta_temp, dt);
+			dg_step += 2 * rate * dt;
+			X_temp += df_step;
+            if(X_temp < 0.95){
+                times[id] = t + dg_step / (2 * rate);
+            }
+		}
+		t += t0 / (2 * rate);
+
+	}
+    results[id] = X_temp;
+}
+
 __global__ void Kernels::SimulateDynamics(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times){
     int id = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -11,8 +45,8 @@ __global__ void Kernels::SimulateDynamics(unsigned long long seed, float tmin, f
     curandState rng;
     curand_init(seed, id, 0, &rng);  
 
- 	float x = curand_uniform(&rng);
-	float X_temp = x;
+ 	float x = curand_uniform(&rng); 
+    float X_temp = x;
     float t = tmin;
 	while(t < tmax){
 
@@ -373,6 +407,33 @@ __host__ void Simulator::ComputeRateValsStochastic(int start, int end){
     }
     this->m_path_manager.WriteIntoFiles(res, time, m_path_manager.m_stc_file);
 }
+__host__ void Simulator::ComputeXTimesStochastic(int start_x, int end_x){
+    int j = start_x;
+    std::vector<float> res = std::vector<float>(end_x - start_x, 0.0f);
+    std::vector<float> time = std::vector<float>(end_x - start_x, 0.0f);
+
+    for(;j < end_x; j++){
+        cudaError_t err = cudaMemset(m_resource_manager.m_dtimes, 0, N * sizeof(float));
+        if(err != cudaSuccess){
+            printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
+            exit(EXIT_FAILURE);
+        } 
+        float x_star = (m_config.GetBeta() - m_config.GetEps()) / (m_config.GetBeta() - m_config.GetAlpha());
+        float x =  x_star + (1 - x_star) * (0.01 * j);
+        Kernels::SimulateDynamicsWithInitialVal<<<m_blocks, m_threads>>>(x, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), m_config.GetRate(), m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes);
+        cudaDeviceSynchronize();
+        err = cudaMemcpy(m_resource_manager.m_htimes.data(), m_resource_manager.m_dtimes, N * sizeof(float), cudaMemcpyDeviceToHost);
+        if(err != cudaSuccess){
+            printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
+            exit(EXIT_FAILURE);
+        } 
+
+        res[j - start_x] = x;
+        time[j - start_x] = ComputeMean(m_resource_manager.m_htimes);
+    }
+    this->m_path_manager.WriteIntoFiles(res, time, m_path_manager.m_stc_file);
+}
+
 __host__ void Simulator::SetBlockSize(int size){
     m_threads = size;
 }
