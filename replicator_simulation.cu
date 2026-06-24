@@ -8,26 +8,24 @@
 
 int main(){
 
-	float a = 0.6f;
-	float eps = 0.8f;
+	float a = 3.0f;
+	float eps = 4.0f;
 	float rate = 1.0f;
-	float h = 0.01;
+	float h = 0.001;
 	float tmin = 0;
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-	float tmax = 100.0f * MyMax(std::abs(1.0f / (a + eps)), std::abs(1.0f / (a - eps)), std::abs(1.0f / (2*a + eps)), std::abs(1.0f / (2*a - eps)), 
-                            std::abs(a / ((a - eps)*(2*a - eps))), std::abs(a / ((a + eps)*(2*a + eps))));
     
     std::string_view path_deterministic = "results_deterministic.txt";
     std::string_view path_stochastic = "results.txt";
     std::string_view path_periodic = "results_periodic.txt";
     
-    SimulatorConfig config(a, 2*a, rate, eps, h, tmin, tmax);
+    SimulatorConfig config(a, 2*a, rate, eps, h, tmin);
     PathManager path_manager(path_deterministic, path_periodic, path_stochastic);
     ResourceManager res = ResourceManager();
 
     Simulator sim(blocks, threads, config, path_manager, res);
-    printf("Tmax = %f\n", tmax);
+    printf("Tmax = %f\n", sim.m_config.GetTmax());
 
     // Kernels::SimulateDynamics<<<sim.GetNumBlocks(), sim.GetNumThreads()>>>(12345ULL, sim.m_config.GetTmin(), sim.m_config.GetTmax(), 
     //                      sim.m_config.GetEps(), sim.m_config.GetRate(), sim.m_config.GetDt(), sim.m_resource_manager.m_dresults, sim.m_resource_manager.m_dtimes);
@@ -37,9 +35,11 @@ int main(){
 
     // sim.m_path_manager.WriteIntoFiles(sim.m_resource_manager.m_hresults, sim.m_resource_manager.m_htimes, sim.m_path_manager.m_stc_file);
     
-    sim.ComputeRateValsPeriodic(0, 100);
-    cudaDeviceSynchronize();
+    float x_left = (sim.m_config.GetBeta() - sim.m_config.GetEps()) / (sim.m_config.GetBeta() - sim.m_config.GetAlpha());
+    float x_right = 1;
 
-    
+    sim.ComputeRateVals(STOCHASTIC, RATE, 0, 100, (x_left + x_right) / 2.0f);
+    //cudaDeviceSynchronize();
+
     return 0;
 }            

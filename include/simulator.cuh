@@ -11,9 +11,20 @@
 #include <fstream>
 
 
-#define N  10000
+#define N  50000
 __constant__ float d_A[2];
 extern float A[2];
+
+enum State{
+    STOCHASTIC,
+    PERIODIC,
+    DETERMINISTIC
+};
+
+enum Sim_Type{
+    POSITION,
+    RATE
+};
 
 template <typename... Args>
 static __host__ constexpr auto MyMax(Args&& ...args){
@@ -21,11 +32,8 @@ static __host__ constexpr auto MyMax(Args&& ...args){
 }
 
 namespace Kernels{
-    __global__ void SimulateDynamicsWithInitialVal(float x, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
-    __global__ void SimulateDynamics(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
-    __global__ void SolveDynamicsDeterministic(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
-    __global__ void SimulateDynamicsPeriodic(unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times);
-};
+    __global__ void SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float init_val = 0);
+}
 
 class SimulatorConfig{
     private:
@@ -35,17 +43,17 @@ class SimulatorConfig{
         float m_rate;
         float m_dt;
         float m_tmin;
-        float m_tmax;
+        float m_tmax = 0.0f;
     public:
         SimulatorConfig(float alpha, float beta, float rate, 
-                        float eps, float dt, float tmin, float tmax);
-        __host__ float GetAlpha();
-        __host__ float GetBeta();
-        __host__ float GetEps();
-        __host__ float GetRate();
-        __host__ float GetDt();
-        __host__ float GetTmin();
-        __host__ float GetTmax();
+                        float eps, float dt, float tmin);
+        __host__ float GetAlpha() const;
+        __host__ float GetBeta() const;
+        __host__ float GetEps() const;
+        __host__ float GetRate() const;
+        __host__ float GetDt() const;
+        __host__ float GetTmin() const;
+        __host__ float GetTmax() const;
         __host__ void SetAlpha(float alpha);
         __host__ void SetBeta(float beta);
         __host__ void SetEps(float eps);
@@ -62,9 +70,9 @@ class PathManager{
         std::fstream m_det_file;
         std::fstream m_stc_file;
         std::fstream m_per_file;
-        __host__ std::string_view GetDetPath();
-        __host__ std::string_view GetStcPath();
-        __host__ std::string_view GetPerPath();
+        __host__ std::string_view GetDetPath() const;
+        __host__ std::string_view GetStcPath() const;
+        __host__ std::string_view GetPerPath() const;
         __host__ void SetDetPath(std::string_view path);
         __host__ void SetStcPath(std::string_view path);
         __host__ void SetPerPath(std::string_view path);
@@ -103,10 +111,7 @@ class Simulator{
         static __device__ float Dg(float rate);
         static __device__ float MidpointSolverg(float rate, float h);
         __host__ float ComputeMean(std::vector<float>& res);
-        __host__ void ComputeRateValsPeriodic(int start_rate, int end_rate);
-        __host__ void ComputeRateValsStochastic(int start_rate, int end_rate);
-        __host__ void ComputeRateValsDeterministic(int start_rate, int end_rate);
-        __host__ void ComputeXTimesStochastic(int start_x, int end_x);
+        __host__ void ComputeRateVals(State state, Sim_Type type, int start_rate, int end_rate, float x = 0);
         Simulator(int blocks, int threads, SimulatorConfig& config, PathManager& path_manager, ResourceManager& resource_manager);
         ~Simulator();
         __host__ int GetNumBlocks();
