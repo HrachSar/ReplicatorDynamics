@@ -32,7 +32,7 @@ static __host__ constexpr auto MyMax(Args&& ...args){
 }
 
 namespace Kernels{
-    __global__ void SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float init_val = 0, bool compute_times = false);
+    __global__ void SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float *hit, float init_val = 0, bool compute_times = false);
 }
 
 class SimulatorConfig{
@@ -78,7 +78,7 @@ class PathManager{
         __host__ void SetPerPath(std::string_view path);
         PathManager(std::string_view results_deterministic, std::string_view results_periodic, std::string_view results_stochastic);
         PathManager(PathManager&& other) noexcept;
-        __host__ void WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::fstream& stream);
+        __host__ void WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::vector<float>& hits, std::fstream& stream);
         ~PathManager();
     private:
         std::string_view m_results_deterministic;
@@ -91,8 +91,11 @@ class ResourceManager{
     public:
         std::vector<float> m_hresults;
         std::vector<float> m_htimes;
+        std::vector<float> m_hhits;
+
         float *m_dresults;
         float *m_dtimes;
+        float *m_dhits;
         __host__ void AllocateMemory();
         __host__ void FreeMemory();
         ResourceManager::ResourceManager(ResourceManager&& other) noexcept;
