@@ -2,7 +2,7 @@
 
 float A[2] = {0};
 
-__global__ void Kernels::SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float init_val){
+__global__ void Kernels::SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float init_val, bool compute_times){
     int id = blockDim.x * blockIdx.x + threadIdx.x;
 
     if(id >= N)
@@ -30,7 +30,7 @@ __global__ void Kernels::SimulateDynamics(State state, unsigned long long seed, 
 	        		float df_step = Simulator::MidpointSolverf(x, etta_temp, dt);
 	        		dg_step += 2 * rate * dt;
 	        		x += df_step;
-                    if(x > 0.99){
+                    if(x > 0.99 && compute_times){
                         times[id] = t + dg_step / (2 * rate);
                         t = tmax;
                         break;
@@ -244,7 +244,7 @@ Simulator::Simulator(int blocks, int threads, SimulatorConfig& config,
 {
     A[0] = config.GetAlpha();
     A[1] = config.GetBeta();
-    float tmax = 1000.0f * MyMax(std::abs(1.0f / (config.GetAlpha() + config.GetEps())), std::abs(1.0f / (config.GetAlpha() - config.GetEps())), 
+    float tmax = 100.0f * MyMax(std::abs(1.0f / (config.GetAlpha() + config.GetEps())), std::abs(1.0f / (config.GetAlpha() - config.GetEps())), 
                     std::abs(1.0f / (config.GetBeta() + config.GetEps())), std::abs(1.0f / (config.GetBeta() - config.GetEps())), 
                             std::abs(config.GetAlpha() / ((config.GetAlpha() - config.GetEps())*(config.GetBeta() - config.GetEps()))), std::abs(config.GetAlpha() / ((config.GetAlpha() + config.GetEps())*(config.GetAlpha() + config.GetEps()))));
     m_config.SetTmax(tmax);
@@ -300,12 +300,12 @@ __host__ void Simulator::ComputeRateVals(State state, Sim_Type type, int start, 
         } 
         if(type == RATE){
             float i = (j + 1) * 0.1f;
-            Kernels::SimulateDynamics<<<m_blocks, m_threads>>>(state, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), i, m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes, x);
+            Kernels::SimulateDynamics<<<m_blocks, m_threads>>>(state, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), i, m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes, x, true);
             res[j - start] = i;
         }else if(type == POSITION){
             float x_star = (m_config.GetBeta() - m_config.GetEps()) / (m_config.GetBeta() - m_config.GetAlpha());
             x =  x_star + (1 - x_star) * (0.01 * j);
-            Kernels::SimulateDynamics<<<m_blocks, m_threads>>>(state, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), m_config.GetRate(), m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes, x);
+            Kernels::SimulateDynamics<<<m_blocks, m_threads>>>(state, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), m_config.GetRate(), m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes, x, true);
             res[j - start] = x;
         }
         cudaDeviceSynchronize();

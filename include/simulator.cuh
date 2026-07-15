@@ -32,7 +32,7 @@ static __host__ constexpr auto MyMax(Args&& ...args){
 }
 
 namespace Kernels{
-    __global__ void SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float init_val = 0);
+    __global__ void SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float init_val = 0, bool compute_times = false);
 }
 
 class SimulatorConfig{
