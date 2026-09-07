@@ -11,7 +11,7 @@
 #include <fstream>
 
 
-#define N  50000
+#define N  1000
 __constant__ float d_A[2];
 extern float A[2];
 
@@ -78,7 +78,7 @@ class PathManager{
         __host__ void SetPerPath(std::string_view path);
         PathManager(std::string_view results_deterministic, std::string_view results_periodic, std::string_view results_stochastic);
         PathManager(PathManager&& other) noexcept;
-        __host__ void WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::vector<float>& hits, std::fstream& stream);
+        __host__ void WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::vector<float>& hits, std::vector<float>& se, std::fstream& stream);
         ~PathManager();
     private:
         std::string_view m_results_deterministic;
@@ -114,6 +114,7 @@ class Simulator{
         static __device__ float Dg(float rate);
         static __device__ float MidpointSolverg(float rate, float h);
         __host__ float ComputeMean(std::vector<float>& res);
+        __host__ float ComputeSE(std::vector<float>& res, float mean);
         __host__ void ComputeRateVals(State state, Sim_Type type, int start_rate, int end_rate, float x = 0);
         Simulator(int blocks, int threads, SimulatorConfig& config, PathManager& path_manager, ResourceManager& resource_manager);
         ~Simulator();

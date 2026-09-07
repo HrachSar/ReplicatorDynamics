@@ -30,7 +30,7 @@ __global__ void Kernels::SimulateDynamics(State state, unsigned long long seed, 
 	        		float df_step = Simulator::MidpointSolverf(x, etta_temp, dt);
 	        		dg_step += 2 * rate * dt;
 	        		x += df_step;
-                    if(x > 0.99 && compute_times){
+                    if(x > 0.66f && compute_times){
                         hit[id]++;
                         times[id] = t + dg_step / (2 * rate);
                         t = tmax;
@@ -181,12 +181,12 @@ __host__ void PathManager::SetPerPath(std::string_view path){
 __host__ void PathManager::SetStcPath(std::string_view path){
     m_results_stochastic = path;
 }
-__host__ void PathManager::WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::vector<float>& hits, std::fstream& stream){
+__host__ void PathManager::WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::vector<float>& hits, std::vector<float>& sd, std::fstream& stream){
     if(!stream.is_open())
         throw std::exception("File stream is not open.");
 
     for(int i = 0; i < res.size(); i++){
-        stream << res[i] << "\t" << times[i] << "\t" << hits[i] << "\n";
+        stream << res[i] << "\t" << times[i] << "\t" << hits[i] << "\t" << sd[i] << "\n";
     }
 
     stream.flush();
@@ -302,11 +302,22 @@ __host__ float Simulator::ComputeMean(std::vector<float>& res){
     return total / res.size();
 }
 
+__host__ float Simulator::ComputeSE(std::vector<float>& res, float mean){
+    float sd = 0.0f;
+    for(auto iter = res.begin(); iter != res.end(); iter++){
+        sd += (*iter - mean)*(*iter - mean);
+    }
+    sd = sqrt(sd / static_cast<float>(res.size()));
+
+    return sd / sqrt(static_cast<float>(res.size()));
+}
+
 __host__ void Simulator::ComputeRateVals(State state, Sim_Type type, int start, int end, float x){
     int j = start;
     std::vector<float> res = std::vector<float>(end - start, 0.0f);
     std::vector<float> time = std::vector<float>(end - start, 0.0f);
     std::vector<float> hitProb = std::vector<float>(end - start, 0.0f);
+    std::vector<float> hitSE = std::vector<float>(end - start, 0.0f);
 
     for(;j < end; j++){
         cudaError_t err = cudaMemset(m_resource_manager.m_dtimes, 0, N * sizeof(float));
@@ -345,17 +356,18 @@ __host__ void Simulator::ComputeRateVals(State state, Sim_Type type, int start, 
 
         time[j - start] = ComputeMean(m_resource_manager.m_htimes);
         hitProb[j - start] = ComputeMean(m_resource_manager.m_hhits);
+        hitSE[j - start] = ComputeSE(m_resource_manager.m_hhits, hitProb[j - start]);
     }
     switch (state)
     {
     case PERIODIC:
-        this->m_path_manager.WriteIntoFiles(res, time, hitProb, m_path_manager.m_per_file);
+        this->m_path_manager.WriteIntoFiles(res, time, hitProb, hitSE, m_path_manager.m_per_file);
         break;
     case STOCHASTIC:
-        this->m_path_manager.WriteIntoFiles(res, time, hitProb, m_path_manager.m_stc_file);
+        this->m_path_manager.WriteIntoFiles(res, time, hitProb, hitSE, m_path_manager.m_stc_file);
         break;
     case DETERMINISTIC:
-        this->m_path_manager.WriteIntoFiles(res, time, hitProb, m_path_manager.m_det_file);
+        this->m_path_manager.WriteIntoFiles(res, time, hitProb, hitSE, m_path_manager.m_det_file);
         break;
     default:
         break;
