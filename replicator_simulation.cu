@@ -10,17 +10,17 @@ int main(){
 
 	float a = 0.6f;
 	float eps = 0.2f;
-	float rate = 10.0f;
+	float rate = 0.1f;
 	float h = 0.001;
 	float tmin = 0;
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
     
     std::string_view path_deterministic = "results_deterministic.txt";
-    std::string_view path_stochastic = "hit_3.txt";
+    std::string_view path_stochastic = "hit_1.txt";
     std::string_view path_periodic = "results_periodic.txt";
     
-    SimulatorConfig config(a, -a, rate, eps, h, tmin);
+    SimulatorConfig config(a, -2*a, rate, eps, h, tmin);
     PathManager path_manager(path_deterministic, path_periodic, path_stochastic);
     ResourceManager res = ResourceManager();
 
