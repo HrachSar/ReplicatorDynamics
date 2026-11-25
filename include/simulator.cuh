@@ -1,133 +1,117 @@
-#ifndef SIMULATOR_CUH
-#define SIMULATOR_CUH
+// simulator.cuh
+//
+// GPU Monte-Carlo simulation of a replicator equation
+//
+//     dx/dt = x (1 - x) (beta + (alpha - beta) x + eta(t)),   x in (0, 1)
+//
+// driven by an external field eta(t) in {+eps, -eps} that is either
+//   * STOCHASTIC    : random telegraph noise, switching at rate 2*rate,
+//   * PERIODIC      : square wave of half-period 1/rate (random phase),
+//   * DETERMINISTIC : eta = 0.
+//
+// Each of kNumTrajectories independent trajectories runs on one GPU thread.
+// For every parameter value we estimate the probability that a trajectory
+// reaches a threshold ("hit") and the mean hitting time among those that do.
+//
+// Build:  nvcc -std=c++17 -O2 src/simulator.cu main.cu -o replicator
+#pragma once
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <curand_kernel.h>
-#include <iostream>
-#include <string_view>
+#include <cuda_runtime.h>
+
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
-#include <fstream>
 
+constexpr int kNumTrajectories = 10000;
 
-#define N  1000
-__constant__ float d_A[2];
-extern float A[2];
+#define CUDA_CHECK(call)                                                      \
+    do {                                                                      \
+        const cudaError_t err_ = (call);                                      \
+        if (err_ != cudaSuccess)                                              \
+            throw std::runtime_error(std::string(cudaGetErrorString(err_)) +  \
+                                     " at " __FILE__ ":" +                    \
+                                     std::to_string(__LINE__));               \
+    } while (0)
 
-enum State{
-    STOCHASTIC,
-    PERIODIC,
-    DETERMINISTIC
+enum class State { Stochastic, Periodic, Deterministic };
+
+// Which quantity is swept in Simulator::RunSweep.
+enum class Sweep {
+    Position,  // initial condition x0 scanned across the interval between the
+               // two unstable fixed points (x* for +eps and for -eps)
+    Rate       // switching rate scanned over 0.1, 0.2, ...
 };
 
-enum Sim_Type{
-    POSITION,
-    RATE
+struct SimulatorConfig {
+    float alpha = 0.0f;
+    float beta = 0.0f;
+    float rate = 0.0f;
+    float eps = 0.0f;
+    float dt = 1e-3f;
+    float tmin = 0.0f;
+    float tmax = 0.0f;  // filled in by Simulator (see ComputeTmax)
+
+    // A trajectory counts as a "hit" when x exceeds this value.
+    float hit_threshold_stochastic = 0.77f;
+    float hit_threshold_other = 0.99f;  // periodic and deterministic
+
+    unsigned long long seed = 12345ULL;
 };
 
-template <typename... Args>
-static __host__ constexpr auto MyMax(Args&& ...args){
-    return std::max({std::forward<Args>(args)...});
-}
-
-namespace Kernels{
-    __global__ void SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float *hit, float init_val = 0, bool compute_times = false);
-}
-
-class SimulatorConfig{
-    private:
-        float m_alpha;
-        float m_beta;
-        float m_eps;
-        float m_rate;
-        float m_dt;
-        float m_tmin;
-        float m_tmax = 0.0f;
-    public:
-        SimulatorConfig(float alpha, float beta, float rate, 
-                        float eps, float dt, float tmin);
-        __host__ float GetAlpha() const;
-        __host__ float GetBeta() const;
-        __host__ float GetEps() const;
-        __host__ float GetRate() const;
-        __host__ float GetDt() const;
-        __host__ float GetTmin() const;
-        __host__ float GetTmax() const;
-        __host__ void SetAlpha(float alpha);
-        __host__ void SetBeta(float beta);
-        __host__ void SetEps(float eps);
-        __host__ void SetRate(float rate);
-        __host__ void SetDt(float dt);
-        __host__ void SetTmin(float tmin);
-        __host__ void SetTmax(float tmax);
-        ~SimulatorConfig();
+struct OutputPaths {
+    std::string deterministic = "results_deterministic.txt";
+    std::string periodic = "results_periodic.txt";
+    std::string stochastic = "hit_1.txt";
 };
 
-class PathManager{
+// Heuristic end-of-simulation time: 100 x the slowest characteristic time scale.
+float ComputeTmax(const SimulatorConfig& cfg);
 
-    public:
-        std::fstream m_det_file;
-        std::fstream m_stc_file;
-        std::fstream m_per_file;
-        __host__ std::string_view GetDetPath() const;
-        __host__ std::string_view GetStcPath() const;
-        __host__ std::string_view GetPerPath() const;
-        __host__ void SetDetPath(std::string_view path);
-        __host__ void SetStcPath(std::string_view path);
-        __host__ void SetPerPath(std::string_view path);
-        PathManager(std::string_view results_deterministic, std::string_view results_periodic, std::string_view results_stochastic);
-        PathManager(PathManager&& other) noexcept;
-        __host__ void WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, std::vector<float>& hits, std::vector<float>& se, 
-                                                std::vector<float2>& wilson, std::fstream& stream);
-        ~PathManager();
-    private:
-        std::string_view m_results_deterministic;
-        std::string_view m_results_periodic;
-        std::string_view m_results_stochastic;
+namespace stats {
+// 95% Wilson score interval for a binomial proportion p_hat from n trials.
+struct Interval { double lo, hi; };
+Interval Wilson95(double p_hat, int n);
+}  // namespace stats
+
+struct CudaFree {
+    void operator()(void* p) const noexcept { cudaFree(p); }
 };
+template <class T>
+using DevPtr = std::unique_ptr<T, CudaFree>;
 
-class ResourceManager{
+class Simulator {
+public:
+    Simulator(SimulatorConfig config, OutputPaths paths, int threads_per_block = 256);
 
-    public:
-        std::vector<float> m_hresults;
-        std::vector<float> m_htimes;
-        std::vector<float> m_hhits;
+    // Runs `state` for sweep indices j in [start, end) and writes one row per j to
+    // the output file of that state (truncated on each call). Columns:
+    //   param  mean_hit_time  hit_prob  hit_prob_se  wilson_lo  wilson_hi
+    // `init_val` is used only for Sweep::Rate; values outside (0,1) mean
+    // "uniform random initial condition".
+    void RunSweep(State state, Sweep sweep, int start, int end, float init_val = 0.0f);
 
-        float *m_dresults;
-        float *m_dtimes;
-        float *m_dhits;
-        __host__ void AllocateMemory();
-        __host__ void FreeMemory();
-        ResourceManager::ResourceManager(ResourceManager&& other) noexcept;
-        ResourceManager();
-        ~ResourceManager();
+    // Runs the simulation once with the parameters in config() and writes one row
+    // per trajectory (kNumTrajectories rows) to the state's output file, or to
+    // `path_override` if given. Columns: trajectory  final_x  hit_time  hit
+    // `final_x` is x at the end of the run, or at the hit if the trajectory hit;
+    // `hit_time` is 0 when hit == 0. `init_val` outside (0,1) = random start.
+    void RunTrajectories(State state, float init_val = 0.0f,
+                         const std::string& path_override = "");
+
+    const SimulatorConfig& config() const { return config_; }
+
+private:
+    const std::string& PathFor(State state) const;
+
+    SimulatorConfig config_;
+    OutputPaths paths_;
+    int threads_;
+    int blocks_;
+    DevPtr<float> d_hit_time_;
+    DevPtr<int> d_hit_;
+    DevPtr<float> d_final_x_;
+    std::vector<float> h_hit_time_;
+    std::vector<int> h_hit_;
+    std::vector<float> h_final_x_;
 };
-
-class Simulator{
-
-    public:
-        SimulatorConfig m_config;
-        PathManager m_path_manager;
-        ResourceManager m_resource_manager;
-        static __device__ float Df(float x, float eps);
-        static __device__ float MidpointSolverf(float x, float eps, float dt);
-        static __device__ float Dg(float rate);
-        static __device__ float MidpointSolverg(float rate, float h);
-        __host__ float ComputeMean(std::vector<float>& res);
-        __host__ float ComputeSE(std::vector<float>& res, float mean);
-        __host__ float ComputeSD(std::vector<float>& res, float mean);
-        __host__ float2 ComputeWilsonScore(float mean);
-        __host__ void ComputeRateVals(State state, Sim_Type type, int start_rate, int end_rate, float x = 0);
-        Simulator(int blocks, int threads, SimulatorConfig& config, PathManager& path_manager, ResourceManager& resource_manager);
-        ~Simulator();
-        __host__ int GetNumBlocks();
-        __host__ int GetNumThreads();
-        __host__ void SetGridSize(int size);
-        __host__ void SetBlockSize(int size);
-    private:
-        int m_blocks;
-        int m_threads;
-};
-
-#endif

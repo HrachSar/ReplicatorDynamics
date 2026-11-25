@@ -1,408 +1,229 @@
+// simulator.cu
 #include "../include/simulator.cuh"
 
-float A[2] = {0};
+#include <curand_kernel.h>
 
-__global__ void Kernels::SimulateDynamics(State state, unsigned long long seed, float tmin, float tmax, float eps, float rate, float dt, float *results, float *times, float *hit, float init_val, bool compute_times){
-    int id = blockDim.x * blockIdx.x + threadIdx.x;
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 
-    if(id >= N)
-        return;
+namespace {
+
+// Everything the kernel needs, passed by value (replaces the old global
+// constant-memory array, so several Simulators can coexist safely).
+struct KernelArgs {
+    State state;
+    unsigned long long seed;
+    float alpha, beta, eps, rate, dt, tmin, tmax;
+    float init_val;   // in (0,1): fixed start; otherwise uniform random start
+    float threshold;  // hit when x > threshold
+};
+
+__device__ __forceinline__ float F(float x, const KernelArgs& a, float eta) {
+    return x * (1.0f - x) * (a.beta + (a.alpha - a.beta) * x + eta);
+}
+
+// One classical RK4 step of size h with constant field eta.
+__device__ __forceinline__ float RK4Increment(float x, float h, const KernelArgs& a, float eta) {
+    const float k1 = F(x, a, eta);
+    const float k2 = F(x + 0.5f * h * k1, a, eta);
+    const float k3 = F(x + 0.5f * h * k2, a, eta);
+    const float k4 = F(x + h * k3, a, eta);
+    return h * (k1 + 2.0f * (k2 + k3) + k4) / 6.0f;
+}
+
+// Integrates for `duration` with constant field `eta`, stopping early on a hit.
+// The last step is shortened so segments have their exact length.
+// Returns true on hit; x and t are updated in place.
+__device__ bool Advance(float& x, float& t, float duration, float eta, const KernelArgs& a) {
+    const float t_end = t + duration;
+    while (t < t_end) {
+        const float h = fminf(a.dt, t_end - t);
+        x += RK4Increment(x, h, a, eta);
+        t += h;
+        if (x > a.threshold) return true;
+    }
+    return false;
+}
+
+__global__ void SimulateKernel(KernelArgs a, float* hit_time, int* hit, float* final_x) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= kNumTrajectories) return;
 
     curandState rng;
-    curand_init(seed, id, 0, &rng);  
-    float x;
-    if(init_val > 0 && init_val < 1)
-        x = init_val;
-    else
-        x = curand_uniform(&rng); 
-    float t = tmin; 
+    curand_init(a.seed, id, 0, &rng);
 
-    switch(state){
-        case STOCHASTIC:
-	        while(t < tmax){
+    float x = (a.init_val > 0.0f && a.init_val < 1.0f) ? a.init_val : curand_uniform(&rng);
+    float t = a.tmin;
+    bool hit_flag = false;
 
-    	    	float u  = curand_uniform(&rng);
-	        	float dg_step = 0;
-                float t0 = -logf(u + 1e-9f);
-	        	float etta_temp = (curand_uniform(&rng) > 0.5f) ? eps : -eps;
-
-    	    	while(dg_step < t0){
-	        		float df_step = Simulator::MidpointSolverf(x, etta_temp, dt);
-	        		dg_step += 2 * rate * dt;
-	        		x += df_step;
-                    if(x > 0.77f && compute_times){
-                        hit[id]++;
-                        times[id] = t + dg_step / (2 * rate);
-                        t = tmax;
-                        break;
-                    }
-	        	}
-	        	t += t0 / (2 * rate);
-
-    	    }
-            break;
-        case PERIODIC:
-            float u = curand_uniform(&rng);
-            float half_period = 1.0f / rate;
-            float eps_temp = eps;     
-            const float t_final = tmax + u * (2.0f / rate);
-    
-            while(t < t_final){
-                eps_temp = -eps_temp;
-            
-                float t_next = t + half_period;
-                if (t_next > t_final)
-                    t_next = t_final;
-            
-                while(t < t_next){
-                    float df_step = Simulator::MidpointSolverf(x, eps_temp, dt);
-                    t += dt;
-                    x += df_step;
-                    if(x > 0.99){
-                        hit[id]++;
-                        times[id] = t;
-                        t = tmax;
-                        break;
-                    }
-                }
+    switch (a.state) {
+        case State::Stochastic: {
+            // Field flips sign at Poisson times of rate 2*rate; the sign of each
+            // segment is chosen uniformly at random.
+            while (t < a.tmax && !hit_flag) {
+                const float dwell = -logf(curand_uniform(&rng)) / (2.0f * a.rate);
+                const float eta = (curand_uniform(&rng) > 0.5f) ? a.eps : -a.eps;
+                hit_flag = Advance(x, t, dwell, eta, a);
             }
             break;
-        case DETERMINISTIC:
-            while(t < tmax){
-
-                float df_step = Simulator::MidpointSolverf(x, 0, dt);
-                x += df_step;
-
-                if(x > 0.99){
-                    hit[id]++;
-                    times[id] = t;
-                    t = tmax;
-                    break;
-                }
-                t += dt;
-            }  
-            break;
-        default:
-            break;
-    }
-    results[id] = x;
-}
-
-SimulatorConfig::SimulatorConfig(float alpha, float beta, float rate, 
-                        float eps, float dt, float tmin){
-    this->m_alpha = alpha;
-    this->m_beta = beta;
-    this->m_rate = rate;
-    this->m_eps = eps;
-    this->m_dt = dt;
-    this->m_tmin = tmin;
-}
-
-__host__ float SimulatorConfig::GetAlpha() const{
-    return m_alpha;
-}
-__host__ float SimulatorConfig::GetBeta() const{
-    return m_beta;
-}
-__host__ float SimulatorConfig::GetEps() const{
-    return m_eps;
-}
-__host__ float SimulatorConfig::GetRate() const{
-    return m_rate;
-}
-__host__ float SimulatorConfig::GetDt() const{
-    return m_dt;
-}
-__host__ float SimulatorConfig::GetTmax() const{
-    return m_tmax;
-}
-__host__ float SimulatorConfig::GetTmin() const{
-    return m_tmin;
-}
-__host__ void SimulatorConfig::SetAlpha(float alpha){
-    m_alpha = alpha;
-}
-__host__ void SimulatorConfig::SetBeta(float beta){
-    m_beta = beta;
-}
-__host__ void SimulatorConfig::SetRate(float rate){
-    m_rate = rate;
-}
-__host__ void SimulatorConfig::SetEps(float eps){
-    m_eps = eps;
-}
-__host__ void SimulatorConfig::SetDt(float dt){
-    m_dt = dt;
-}
-__host__ void SimulatorConfig::SetTmin(float tmin){
-    m_tmin = tmin;
-}
-__host__ void SimulatorConfig::SetTmax(float tmax){
-    m_tmax = tmax;
-}
-SimulatorConfig::~SimulatorConfig(){}
-
-PathManager::PathManager(std::string_view results_deterministic, std::string_view results_periodic, std::string_view results_stochastic){
-    this->m_results_deterministic = results_deterministic;
-    this->m_results_periodic = results_periodic;
-    this->m_results_stochastic = results_stochastic;
-    this->m_det_file.open(m_results_deterministic.data(), std::ios::out | std::ios::trunc);
-    this->m_stc_file.open(m_results_stochastic.data(), std::ios::out | std::ios::trunc);
-    this->m_per_file.open(m_results_periodic.data(), std::ios::out | std::ios::trunc);
-
-    if(!m_det_file || !m_per_file || !m_stc_file)
-            throw std::runtime_error("Failed to open output files.");
-}
-
-PathManager::PathManager(PathManager&& other) noexcept
-    : m_det_file(std::move(other.m_det_file))
-    , m_stc_file(std::move(other.m_stc_file))
-    , m_per_file(std::move(other.m_per_file))
-    , m_results_deterministic(other.m_results_deterministic)
-    , m_results_periodic(other.m_results_periodic)
-    , m_results_stochastic(other.m_results_stochastic)
-{}
-
-__host__ std::string_view PathManager::GetDetPath() const{
-    return m_results_deterministic;
-}
-__host__ std::string_view PathManager::GetStcPath() const{
-    return m_results_stochastic;
-}
-__host__ std::string_view PathManager::GetPerPath() const{
-    return m_results_periodic;
-}
-__host__ void PathManager::SetDetPath(std::string_view path){
-    m_results_deterministic = path;
-}
-__host__ void PathManager::SetPerPath(std::string_view path){
-    m_results_periodic = path;
-}
-__host__ void PathManager::SetStcPath(std::string_view path){
-    m_results_stochastic = path;
-}
-__host__ void PathManager::WriteIntoFiles(std::vector<float>& res, std::vector<float>& times, 
-                std::vector<float>& hits, std::vector<float>& sd, std::vector<float2>& wilson, std::fstream& stream){
-    if(!stream.is_open())
-        throw std::exception("File stream is not open.");
-
-    for(int i = 0; i < res.size(); i++){
-        stream  << res[i] << "\t" << times[i] << "\t" << hits[i] << "\t" << sd[i] << "\t" << wilson[i].x << "\t" << wilson[i].y << "\n";
-    }
-     
-
-    stream.flush();
-}
-PathManager::~PathManager(){
-    m_det_file.close();
-    m_per_file.close();
-    m_stc_file.close();
-}
-
-
-__host__ void ResourceManager::AllocateMemory(){
-    cudaError_t err = cudaMalloc((void **)&(this->m_dresults), N * sizeof(float));
-    if(err != cudaSuccess){
-        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-        exit(EXIT_FAILURE);
-    }
-
-    err = cudaMalloc((void **)&(this->m_dtimes), N * sizeof(float));
-    if(err != cudaSuccess){
-        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-        exit(EXIT_FAILURE);
-    }
-
-    err = cudaMalloc((void **)&(this->m_dhits), N * sizeof(float));
-    if(err != cudaSuccess){
-        printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-        exit(EXIT_FAILURE);
-    }
-
-    m_hresults.resize(N, 0);
-    m_htimes.resize(N, 0);
-    m_hhits.resize(N, 0);
-}
-__host__ void ResourceManager::FreeMemory(){
-    cudaFree(m_dresults);
-    cudaFree(m_dtimes);
-    cudaFree(m_dhits);
-    m_hresults.clear();
-    m_htimes.clear();
-    m_hhits.clear();
-}
-ResourceManager::ResourceManager(){
-    AllocateMemory();
-}
-ResourceManager::ResourceManager(ResourceManager&& other) noexcept
-    : m_hresults(std::move(other.m_hresults))
-    , m_htimes(std::move(other.m_htimes))
-    , m_hhits(std::move(other.m_hhits))
-    , m_dresults(other.m_dresults)
-    , m_dtimes(other.m_dtimes)
-    , m_dhits(other.m_dhits)
-{
-    other.m_dresults = nullptr;
-    other.m_dtimes   = nullptr;
-    other.m_dhits    = nullptr;
-}
-
-ResourceManager::~ResourceManager(){
-    FreeMemory();
-}
-
-Simulator::Simulator(int blocks, int threads, SimulatorConfig& config, 
-                     PathManager& path_manager, ResourceManager& resource_manager)
-    : m_blocks(blocks)
-    , m_threads(threads)
-    , m_config(config)                   
-    , m_path_manager(std::move(path_manager))
-    , m_resource_manager(std::move(resource_manager))
-{
-    A[0] = config.GetAlpha();
-    A[1] = config.GetBeta();
-    float tmax = 100.0f * MyMax(std::abs(1.0f / (config.GetAlpha() + config.GetEps())), std::abs(1.0f / (config.GetAlpha() - config.GetEps())), 
-                    std::abs(1.0f / (config.GetBeta() + config.GetEps())), std::abs(1.0f / (config.GetBeta() - config.GetEps())), 
-                            std::abs(config.GetAlpha() / ((config.GetAlpha() - config.GetEps())*(config.GetBeta() - config.GetEps()))), std::abs(config.GetAlpha() / ((config.GetAlpha() + config.GetEps())*(config.GetAlpha() + config.GetEps()))));
-    m_config.SetTmax(tmax);
-    cudaMemcpyToSymbol(d_A, A, 2 * sizeof(float)); //for constant memory
-}
-
-__device__ float Simulator::Df(float x, float eps){
-    float alpha = d_A[0];
-	float beta = d_A[1];
-	float dx = x * (1 - x) * (beta + (alpha - beta) * x + eps);
-
-	return dx;
-}
-__device__ float Simulator::MidpointSolverf(float x, float eps, float dt){
-	float Xmid = x;
-	float r1 = Df(Xmid, eps);
-	Xmid += dt * r1 * 0.5;
-	float r2 = Df(Xmid, eps);
-	r2 *= dt;
-
-	return r2;
-}
-__device__ float Simulator::Dg(float rate){
-	float dx = 2 * rate;
-
-	return dx;
-}
-__device__ float Simulator::MidpointSolverg(float rate, float h){
-	float r1 = h * Dg(rate);
-	float r2 = h * Dg(rate + r1 * 0.5);
-
-	return r2;
-}
-
-__host__ float Simulator::ComputeMean(std::vector<float>& res){
-    float total = 0.0f;
-    for(auto iter = res.begin(); iter != res.end(); iter++){
-        total += *iter;
-    }
-    return total / res.size();
-}
-
-__host__ float Simulator::ComputeSD(std::vector<float>& res, float mean){
-    float sd = 0.0f;
-    for(auto iter = res.begin(); iter != res.end(); iter++){
-        sd += (*iter - mean)*(*iter - mean);
-    }
-    sd = sqrt(sd / static_cast<float>(res.size()));
-
-    return sd;
-}
-
-__host__ float Simulator::ComputeSE(std::vector<float>& res, float mean){
-    float sd = 0.0f;
-    sd = ComputeSD(res, mean);
-
-    return sd / sqrt(static_cast<float>(res.size()));
-}
-
-__host__ float2 Simulator::ComputeWilsonScore(float mean){
-    float z = 1.959964f;
-    float w = 1.0f / (1 + z*z / (float)(N)) * (mean + z*z / (2.0f * N)); 
-    float h = 1.0f / (1 + z*z / (float)(N)) * z / (float)(2 * N) * sqrtf(4.0f * N * mean * (1 - mean) + z*z); 
-    float2 p_hat = {w - h, w + h};
-
-    return p_hat;
-}
-
-__host__ void Simulator::ComputeRateVals(State state, Sim_Type type, int start, int end, float x){
-    int j = start;
-    std::vector<float> res = std::vector<float>(end - start, 0.0f);
-    std::vector<float> time = std::vector<float>(end - start, 0.0f);
-    std::vector<float> hitProb = std::vector<float>(end - start, 0.0f);
-    std::vector<float> hitSE = std::vector<float>(end - start, 0.0f);
-    std::vector<float2> wilson = std::vector<float2>(end - start, {0.0f, 0.0f});
-
-    for(;j < end; j++){
-        cudaError_t err = cudaMemset(m_resource_manager.m_dtimes, 0, N * sizeof(float));
-        if(err != cudaSuccess){
-            printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-            exit(EXIT_FAILURE);
-        } 
-        err = cudaMemset(m_resource_manager.m_dhits, 0, N * sizeof(float));
-        if(err != cudaSuccess){
-            printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-            exit(EXIT_FAILURE);
-        } 
-        if(type == RATE){
-            float i = (j + 1) * 0.1f;
-            Kernels::SimulateDynamics<<<m_blocks, m_threads>>>(state, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), i, m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes, m_resource_manager.m_dhits, x, true);
-            res[j - start] = i;
-        }else if(type == POSITION){
-            float x_star = (m_config.GetBeta() + m_config.GetEps()) / (m_config.GetBeta() - m_config.GetAlpha()) + 0.001;
-            x =  x_star + ((m_config.GetBeta() - m_config.GetEps()) / (m_config.GetBeta() - m_config.GetAlpha()) - x_star) * (0.01 * j);
-            Kernels::SimulateDynamics<<<m_blocks, m_threads>>>(state, 12345ULL, m_config.GetTmin(), m_config.GetTmax(), m_config.GetEps(), m_config.GetRate(), m_config.GetDt(), m_resource_manager.m_dresults, m_resource_manager.m_dtimes, m_resource_manager.m_dhits, x, true);
-            res[j - start] = x;
         }
-        cudaDeviceSynchronize();
-
-        err = cudaMemcpy(m_resource_manager.m_htimes.data(), m_resource_manager.m_dtimes, N * sizeof(float), cudaMemcpyDeviceToHost);
-        if(err != cudaSuccess){
-            printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-            exit(EXIT_FAILURE);
-        } 
-
-        err = cudaMemcpy(m_resource_manager.m_hhits.data(), m_resource_manager.m_dhits, N * sizeof(float), cudaMemcpyDeviceToHost);
-        if(err != cudaSuccess){
-            printf("%s in %s at line %d\n", cudaGetErrorString(err), __FILE__, __LINE__);
-            exit(EXIT_FAILURE);
-        } 
-
-        time[j - start] = ComputeMean(m_resource_manager.m_htimes);
-        hitProb[j - start] = ComputeMean(m_resource_manager.m_hhits);
-        hitSE[j - start] = ComputeSE(m_resource_manager.m_hhits, hitProb[j - start]);
-        wilson[j - start] = ComputeWilsonScore(hitProb[j - start]);
+        case State::Periodic: {
+            // Square wave of half-period 1/rate. The end time is extended by a
+            // random fraction of a full period to randomise the final phase.
+            const float half_period = 1.0f / a.rate;
+            const float t_final = a.tmax + curand_uniform(&rng) * (2.0f / a.rate);
+            float eta = a.eps;
+            while (t < t_final && !hit_flag) {
+                eta = -eta;
+                hit_flag = Advance(x, t, fminf(half_period, t_final - t), eta, a);
+            }
+            break;
+        }
+        case State::Deterministic: {
+            hit_flag = Advance(x, t, a.tmax - a.tmin, 0.0f, a);
+            break;
+        }
     }
-    switch (state)
-    {
-    case PERIODIC:
-        this->m_path_manager.WriteIntoFiles(res, time, hitProb, hitSE, wilson, m_path_manager.m_per_file);
-        break;
-    case STOCHASTIC:
-        this->m_path_manager.WriteIntoFiles(res, time, hitProb, hitSE, wilson, m_path_manager.m_stc_file);
-        break;
-    case DETERMINISTIC:
-        this->m_path_manager.WriteIntoFiles(res, time, hitProb, hitSE, wilson, m_path_manager.m_det_file);
-        break;
-    default:
-        break;
-    }    
+
+    hit[id] = hit_flag ? 1 : 0;
+    hit_time[id] = hit_flag ? t : 0.0f;
+    final_x[id] = x;
 }
-__host__ void Simulator::SetBlockSize(int size){
-    m_threads = size;
+
+template <class T>
+DevPtr<T> DeviceAlloc(size_t n) {
+    T* p = nullptr;
+    CUDA_CHECK(cudaMalloc(&p, n * sizeof(T)));
+    return DevPtr<T>(p);
 }
-__host__ void Simulator::SetGridSize(int size){
-    m_blocks = size;
+
+}  // namespace
+
+float ComputeTmax(const SimulatorConfig& c) {
+    const float a = c.alpha, b = c.beta, e = c.eps;
+    const float t = 100.0f * std::max({std::fabs(1.0f / (a + e)),
+                                       std::fabs(1.0f / (a - e)),
+                                       std::fabs(1.0f / (b + e)),
+                                       std::fabs(1.0f / (b - e)),
+                                       std::fabs(a / ((a - e) * (b - e))),
+                                       std::fabs(a / ((a + e) * (a + e)))});
+    if (!std::isfinite(t))
+        throw std::invalid_argument("ComputeTmax: degenerate parameters (division by zero)");
+    return t;
 }
-__host__ int Simulator::GetNumBlocks(){
-    return m_blocks;
+
+stats::Interval stats::Wilson95(double p, int n) {
+    const double z = 1.959964, z2 = z * z, nn = n;
+    const double denom = 1.0 + z2 / nn;
+    const double centre = (p + z2 / (2.0 * nn)) / denom;
+    const double half = z / (2.0 * nn) * std::sqrt(4.0 * nn * p * (1.0 - p) + z2) / denom;
+    return {centre - half, centre + half};
 }
-__host__ int Simulator::GetNumThreads(){
-    return m_threads;
+
+Simulator::Simulator(SimulatorConfig config, OutputPaths paths, int threads_per_block)
+    : config_(config),
+      paths_(std::move(paths)),
+      threads_(threads_per_block),
+      blocks_((kNumTrajectories + threads_per_block - 1) / threads_per_block),
+      d_hit_time_(DeviceAlloc<float>(kNumTrajectories)),
+      d_hit_(DeviceAlloc<int>(kNumTrajectories)),
+      d_final_x_(DeviceAlloc<float>(kNumTrajectories)),
+      h_hit_time_(kNumTrajectories, 0.0f),
+      h_hit_(kNumTrajectories, 0),
+      h_final_x_(kNumTrajectories, 0.0f) {
+    config_.tmax = ComputeTmax(config_);
 }
-Simulator::~Simulator(){}
+
+const std::string& Simulator::PathFor(State s) const {
+    switch (s) {
+        case State::Stochastic: return paths_.stochastic;
+        case State::Periodic: return paths_.periodic;
+        case State::Deterministic: return paths_.deterministic;
+    }
+    throw std::logic_error("unknown State");
+}
+
+void Simulator::RunSweep(State state, Sweep sweep, int start, int end, float init_val) {
+    std::ofstream out(PathFor(state), std::ios::out | std::ios::trunc);
+    if (!out) throw std::runtime_error("Failed to open output file: " + PathFor(state));
+    out << std::setprecision(8)
+        << "param\tmean_hit_time\thit_prob\thit_prob_se\twilson_lo\twilson_hi\n";
+
+    const SimulatorConfig& c = config_;
+    const double span = static_cast<double>(c.beta) - c.alpha;
+    // Unstable fixed points of the dynamics under eta = +eps and eta = -eps.
+    const double x_lo = (c.beta + c.eps) / span;
+    const double x_hi = (c.beta - c.eps) / span;
+
+    for (int j = start; j < end; ++j) {
+        KernelArgs args{state, c.seed, c.alpha, c.beta, c.eps, c.rate,
+                        c.dt, c.tmin, c.tmax, init_val,
+                        state == State::Stochastic ? c.hit_threshold_stochastic
+                                                   : c.hit_threshold_other};
+        float param = 0.0f;
+        if (sweep == Sweep::Rate) {
+            args.rate = (j + 1) * 0.1f;
+            param = args.rate;
+        } else {
+            const double x_start = x_lo + 0.001;
+            args.init_val = static_cast<float>(x_start + (x_hi - x_start) * (0.01 * j));
+            param = args.init_val;
+        }
+
+        SimulateKernel<<<blocks_, threads_>>>(args, d_hit_time_.get(), d_hit_.get(),
+                                             d_final_x_.get());
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(h_hit_time_.data(), d_hit_time_.get(),
+                              kNumTrajectories * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_hit_.data(), d_hit_.get(),
+                              kNumTrajectories * sizeof(int), cudaMemcpyDeviceToHost));
+
+        double time_sum = 0.0;
+        long long n_hits = 0;
+        for (int i = 0; i < kNumTrajectories; ++i) {
+            n_hits += h_hit_[i];
+            time_sum += h_hit_time_[i];
+        }
+        const double p = static_cast<double>(n_hits) / kNumTrajectories;
+        const double se = std::sqrt(p * (1.0 - p) / kNumTrajectories);
+        // Mean hitting time is conditioned on having hit (NaN if no trajectory did).
+        const double mean_time =
+            n_hits > 0 ? time_sum / n_hits : std::numeric_limits<double>::quiet_NaN();
+        const stats::Interval w = stats::Wilson95(p, kNumTrajectories);
+
+        out << param << '\t' << mean_time << '\t' << p << '\t' << se << '\t' << w.lo << '\t'
+            << w.hi << '\n';
+        out.flush();
+    }
+}
+
+void Simulator::RunTrajectories(State state, float init_val, const std::string& path_override) {
+    const std::string& path = path_override.empty() ? PathFor(state) : path_override;
+    std::ofstream out(path, std::ios::out | std::ios::trunc);
+    if (!out) throw std::runtime_error("Failed to open output file: " + path);
+
+    const SimulatorConfig& c = config_;
+    const KernelArgs args{state, c.seed, c.alpha, c.beta, c.eps, c.rate,
+                          c.dt, c.tmin, c.tmax, init_val,
+                          state == State::Stochastic ? c.hit_threshold_stochastic
+                                                     : c.hit_threshold_other};
+
+    SimulateKernel<<<blocks_, threads_>>>(args, d_hit_time_.get(), d_hit_.get(),
+                                         d_final_x_.get());
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(h_hit_time_.data(), d_hit_time_.get(),
+                          kNumTrajectories * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_hit_.data(), d_hit_.get(),
+                          kNumTrajectories * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_final_x_.data(), d_final_x_.get(),
+                          kNumTrajectories * sizeof(float), cudaMemcpyDeviceToHost));
+
+    out << std::setprecision(8) << "trajectory\tfinal_x\thit_time\thit\n";
+    for (int i = 0; i < kNumTrajectories; ++i)
+        out << i << '\t' << h_final_x_[i] << '\t' << h_hit_time_[i] << '\t' << h_hit_[i] << '\n';
+}
