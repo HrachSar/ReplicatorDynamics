@@ -1,7 +1,6 @@
 # GPU Replicator Dynamics under a Switching Field
 
-CUDA Monte-Carlo simulation of a one-dimensional replicator equation driven by an
-external field that switches between two values. Thousands of independent
+CUDA Monte-Carlo simulation of a one-dimensional replicator equation driven by a dichotomous noise that switches between two values. Thousands of independent
 trajectories run in parallel (one per GPU thread), and the program estimates how
 likely, and how quickly, the system escapes to a target state.
 
@@ -16,11 +15,6 @@ dx/dt = x (1 - x) ( beta + (alpha - beta) x + eta(t) )
 with `eta(t)` taking the values `+eps` or `-eps`. For each fixed value of `eta` the
 dynamics are bistable: `x = 0` and `x = 1` are stable, and an interior fixed point
 
-```
-x*(eta) = (beta + eta) / (beta - alpha)
-```
-
-is unstable. The three driving modes are:
 
 | Mode            | Field `eta(t)`                                                                    |
 |-----------------|-----------------------------------------------------------------------------------|
@@ -58,13 +52,6 @@ main.cu                 example driver
 Parameters live in `SimulatorConfig`; output files in `OutputPaths`.
 
 ```cpp
-SimulatorConfig config;
-config.alpha = 0.6f;
-config.beta  = -2.0f * config.alpha;
-config.eps   = 0.2f;
-config.rate  = 0.1f;
-config.dt    = 1e-3f;
-
 Simulator sim(config, OutputPaths{}, /*threads_per_block=*/256);
 
 // (a) Parameter sweep: one statistics row per sweep point
@@ -110,11 +97,6 @@ Runs all trajectories once with the configured parameters and writes one row eac
 
 ## Notes and limitations
 
-- **Reproducibility.** The RNG seed is `config.seed` (default 12345) and is the
-  same at every sweep point, so results are repeatable and sweeps use common
-  random numbers. Change the seed for independent repeats.
-- **Stopping at a hit.** Trajectories stop when they cross the threshold, so
-  `final_x` for hitters is just above the threshold, not the value at `tmax`.
 - **Number of trajectories** is the compile-time constant `kNumTrajectories`
   (10 000) in `simulator.cuh`.
 - **Errors.** CUDA failures and file errors throw `std::runtime_error`; `main`
